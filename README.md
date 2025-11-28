@@ -7,3 +7,4 @@
 - [LED-neo](LED-neo)
 - [sensors](sensors)
 - [network](network)
+- [Labos](Labos)
