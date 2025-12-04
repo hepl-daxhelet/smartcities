@@ -2,26 +2,23 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 
-// Attribution pins capteur + led 
-#define PIR_PIN 13
-#define LED_PIN 14
-
 // -------- CONFIG WIFI ----------
 #define WIFI_SSID       "electroProjectWifi"
 #define WIFI_PASSWORD   "B1MesureEnv"
 
 // -------- CONFIG MQTT ----------
-#define MQTT_SERVER     "192.168.2.28"   // Adresse du broker MQTT
+#define MQTT_SERVER     "192.168.2.28"
 #define MQTT_PORT       1883
-#define MQTT_TOPIC       "test"
-
-
-// -------- TIMER ---------------
-unsigned long captureInterval = 15000; // 15 sec
-unsigned long lastCapture = 0;
 
 WiFiClient wifiClient;
 PubSubClient mqtt(wifiClient);
+
+// -------- Bouton de réveil ----------
+#define WAKE_BUTTON_PIN 13  // Bouton entre GPIO12 et GND
+
+// -------- Mémorisation du temps de la dernière photo --------
+RTC_DATA_ATTR unsigned long lastCaptureTime = 0;  // Conservé même pendant deep sleep
+
 
 
 // -------- CONFIG CAMERA (AI Thinker) --------
@@ -43,8 +40,9 @@ PubSubClient mqtt(wifiClient);
 #define PCLK_GPIO_NUM     21
 
 
+
 // -----------------------------------------------------
-// Initialisation de la caméra
+// INITIALISATION CAMÉRA
 // -----------------------------------------------------
 bool initCamera() {
   camera_config_t config;
@@ -66,11 +64,10 @@ bool initCamera() {
   config.pin_sscb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn     = PWDN_GPIO_NUM;
   config.pin_reset    = RESET_GPIO_NUM;
-
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
 
-  config.frame_size   = FRAMESIZE_SVGA; // 800x600
+  config.frame_size   = FRAMESIZE_SVGA;
   config.jpeg_quality = 12;
   config.fb_count     = 1;
 
@@ -83,8 +80,9 @@ bool initCamera() {
 }
 
 
+
 // -----------------------------------------------------
-// Connexion MQTT (reconnexion automatique)
+// MQTT reconnect
 // -----------------------------------------------------
 void mqttReconnect() {
   while (!mqtt.connected()) {
@@ -94,36 +92,26 @@ void mqttReconnect() {
     } else {
       Serial.print("Erreur : ");
       Serial.println(mqtt.state());
-      delay(2000);
+      delay(1000);
     }
   }
 }
 
 
+
 // -----------------------------------------------------
-// Envoi de la photo sur MQTT en plusieurs morceaux
+// ENVOI DE l’IMAGE EN CHUNKS
 // -----------------------------------------------------
 bool sendImageMQTT(uint8_t *buf, size_t len) {
-
   if (!mqtt.connected()) return false;
 
   const int chunkSize = 2000;
 
-  // Envoyer la taille de l'image
   mqtt.publish("test/start", String(len).c_str());
 
   for (size_t i = 0; i < len; i += chunkSize) {
     size_t sendSize = min(chunkSize, (int)(len - i));
-
-    Serial.print("➜ Envoi chunk taille = ");
-    Serial.println(sendSize);
-
-    if (!mqtt.publish("test/data", buf + i, sendSize)) {
-        Serial.println("❌ Chunk FAIL (pub refused)");
-    } else {
-        Serial.println("✔ Chunk OK");
-    }
-
+    mqtt.publish("test/data", buf + i, sendSize);
     delay(5);
   }
 
@@ -141,64 +129,93 @@ bool sendImageMQTT(uint8_t *buf, size_t len) {
 // -----------------------------------------------------
 void setup() {
   Serial.begin(115200);
-  
-  // Config pins
-  pinMode(PIR_PIN, INPUT);
-  pinMode(LED_PIN, OUTPUT);
+  delay(500);
 
-  // WiFi
+  esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+
+  Serial.print("Cause reveil = ");
+  Serial.println(cause);
+
+  // ---------- ETAT 1 : réveil par TIMER → activer bouton ----------
+  if (cause == ESP_SLEEP_WAKEUP_TIMER) {
+    Serial.println("⏱ 15s écoulées → bouton réactivé");
+
+    // On Active le bouton
+    pinMode(WAKE_BUTTON_PIN, INPUT_PULLUP);
+    esp_sleep_enable_ext0_wakeup((gpio_num_t)WAKE_BUTTON_PIN, 1);
+
+    Serial.println("💤 Deep sleep en attente du bouton...");
+    esp_deep_sleep_start();
+  }
+
+
+  // ---------- ETAT 2 : réveil par BOUTON ----------
+  if (cause == ESP_SLEEP_WAKEUP_EXT0) {
+    Serial.println("🔘 Réveil par le bouton → capture autorisée");
+  }
+
+  // ---------- ETAT 3 : premier boot ----------
+  if (cause != ESP_SLEEP_WAKEUP_EXT0 && cause != ESP_SLEEP_WAKEUP_TIMER) {
+    Serial.println("⚡ Premier boot → bouton désactivé 15s");
+
+    // bouton désactivé → on ne met pas ext0
+    esp_sleep_enable_timer_wakeup(15 * 1000000ULL);
+    esp_deep_sleep_start();
+  }
+
+
+  // ========== SI ON ARRIVE ICI → CAPTURE AUTORISÉE ==========
+  Serial.println("📸 Capture image…");
+
+  if (!initCamera()) Serial.println("Erreur init cam !");
+
+  // ------- Connexion WiFi -------
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("Connexion WiFi");
   while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
     Serial.print(".");
+    delay(300);
   }
   Serial.println(" CONNECTÉ !");
 
-  // MQTT
   mqtt.setServer(MQTT_SERVER, MQTT_PORT);
+  mqttReconnect();
 
-  // Caméra
-  initCamera();
-
-  lastCapture = millis();
-}
-
-
-// -----------------------------------------------------
-// LOOP
-// -----------------------------------------------------
-void loop() {
-  //if (millis() - lastCapture >= captureInterval) {
-  if(digitalRead(PIR_PIN) && millis() - lastCapture >= captureInterval) {
-    digitalWrite(LED_PIN, HIGH);
-    lastCapture = millis();   // <<< IMPORTANT
-    Serial.println("→ Capture image…");
-
-    camera_fb_t *fb = esp_camera_fb_get();
-    if (!fb) {
-      Serial.println("Erreur capture !");
-      return;
-    }
-
-    Serial.println("📸 Photo capturée !");
-    Serial.print("📏 Taille JPEG : ");
-    Serial.print(fb->len);
-    Serial.println(" octets");
-
-    // Connexion MQTT après la photo
-    if (!mqtt.connected()) mqttReconnect();
-    if (!mqtt.connected()) {
-      Serial.println("MQTT non dispo.");
-      esp_camera_fb_return(fb);
-      return;
-    }
-
+  // ------- Capture -------
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (fb) {
     sendImageMQTT(fb->buf, fb->len);
-    Serial.println("Image envoyée via MQTT !");
-
     esp_camera_fb_return(fb);
   }
 
-  mqtt.loop();
+  // Après capture → on BLOQUE le bouton 15s
+  Serial.println("🔒 Bouton désactivé pendant 15s…");
+
+  // Bouton désactivé → PAS DE EXT0
+  esp_sleep_enable_timer_wakeup(15 * 1000000ULL);
+
+  Serial.println("💤 Deep sleep 15s...");
+  esp_deep_sleep_start();
+
+
+
+
+
+  // ------- DEEP SLEEP -------
+  Serial.println("💤 Mise en Deep Sleep…");
+
+  pinMode(WAKE_BUTTON_PIN, INPUT_PULLUP);
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)WAKE_BUTTON_PIN, 1);
+
+  esp_deep_sleep_start();
+}
+
+
+
+
+// -----------------------------------------------------
+// LOOP INUTILISÉ EN DEEP SLEEP
+// -----------------------------------------------------
+void loop() {
+  Serial.println("boucle principale");
+  delay(1000);
 }
