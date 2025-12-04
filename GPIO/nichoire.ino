@@ -2,23 +2,22 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 
+// Attribution pins capteur + led 
 #define PIR_PIN 13
+#define LED_PIN 14
 
 // -------- CONFIG WIFI ----------
 #define WIFI_SSID       "electroProjectWifi"
 #define WIFI_PASSWORD   "B1MesureEnv"
 
 // -------- CONFIG MQTT ----------
-#define MQTT_SERVER     "192.168.2.26"   // Adresse du broker MQTT
+#define MQTT_SERVER     "192.168.2.28"   // Adresse du broker MQTT
 #define MQTT_PORT       1883
 #define MQTT_TOPIC       "test"
 
-#define TOPIC_START     "camera/image/start"
-#define TOPIC_DATA      "camera/image/data"
-#define TOPIC_END       "camera/image/end"
 
 // -------- TIMER ---------------
-unsigned long captureInterval = 10000; // 30 sec
+unsigned long captureInterval = 15000; // 15 sec
 unsigned long lastCapture = 0;
 
 WiFiClient wifiClient;
@@ -141,8 +140,11 @@ bool sendImageMQTT(uint8_t *buf, size_t len) {
 // SETUP
 // -----------------------------------------------------
 void setup() {
-  pinMode(PIR_PIN, INPUT);
   Serial.begin(115200);
+  
+  // Config pins
+  pinMode(PIR_PIN, INPUT);
+  pinMode(LED_PIN, OUTPUT);
 
   // WiFi
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -167,12 +169,9 @@ void setup() {
 // LOOP
 // -----------------------------------------------------
 void loop() {
-
-  uint8_t state = digitalRead(PIR_PIN);
-  Serial.println(state);
   //if (millis() - lastCapture >= captureInterval) {
-  if(state == HIGH && millis() - lastCapture >= captureInterval) {
-
+  if(digitalRead(PIR_PIN) && millis() - lastCapture >= captureInterval) {
+    digitalWrite(LED_PIN, HIGH);
     lastCapture = millis();   // <<< IMPORTANT
     Serial.println("→ Capture image…");
 
